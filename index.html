@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ka">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ვიტრინის ფოტოები</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Vitrina Photo App</p>
+        <h1>ვიტრინის ფოტოები</h1>
+        <p class="subtitle">დაარქვი სახელი, გადაიღე ფოტო, მონიშნე, გაუგზავნე WhatsApp-ზე და კვირის ბოლოს ჩამოქაჩე ZIP-ად.</p>
+      </div>
+      <button id="refreshBtn" class="glass-btn small">განახლება</button>
+    </header>
+
+    <main class="grid">
+      <section class="card upload-card">
+        <div class="section-title">
+          <h2>ფოტოს დამატება</h2>
+          <p>სახელი შენს ZIP-ში ზუსტად ასე გამოჩნდება.</p>
+        </div>
+
+        <label class="field">
+          <span>ფოტოს სახელი / მაღაზიის კოდი</span>
+          <input id="photoName" type="text" placeholder="მაგ: BH001 ან BH001_VITRINA" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          <span>შენიშვნა სურვილისამებრ</span>
+          <input id="note" type="text" placeholder="მაგ: გარე ვიტრინა, ფასები..." autocomplete="off" />
+        </label>
+
+        <label class="check-row">
+          <input id="autoNumber" type="checkbox" checked />
+          <span>რამდენიმე ფოტოზე ავტომატურად დაემატოს _001, _002, _003</span>
+        </label>
+
+        <label class="file-box">
+          <input id="photoInput" type="file" accept="image/*" capture="environment" multiple />
+          <span class="file-icon">📷</span>
+          <strong>ფოტოს გადაღება / არჩევა</strong>
+          <small>შეგიძლია რამდენიმე ფოტო ერთად აირჩიო</small>
+        </label>
+
+        <div id="selectedPreview" class="preview-list empty">
+          ფოტო ჯერ არჩეული არ არის
+        </div>
+
+        <div class="actions">
+          <button id="uploadBtn" class="primary-btn">ატვირთვა</button>
+          <button id="clearSelectedBtn" class="glass-btn">არჩეულის გასუფთავება</button>
+        </div>
+
+        <div id="uploadProgress" class="progress hidden">
+          <div class="progress-bar" id="progressBar"></div>
+          <span id="progressText">იტვირთება...</span>
+        </div>
+      </section>
+
+      <section class="card filter-card">
+        <div class="section-title">
+          <h2>ფილტრი და ჩამოტვირთვა</h2>
+          <p>დღით, კვირით ან სახელით მოძებნე ფოტოები.</p>
+        </div>
+
+        <div class="filter-grid">
+          <label class="field">
+            <span>დან</span>
+            <input id="fromDate" type="date" />
+          </label>
+
+          <label class="field">
+            <span>მდე</span>
+            <input id="toDate" type="date" />
+          </label>
+        </div>
+
+        <label class="field">
+          <span>სახელში ძებნა</span>
+          <input id="searchName" type="text" placeholder="მაგ: BH001" autocomplete="off" />
+        </label>
+
+        <div class="quick-actions">
+          <button id="todayBtn" class="glass-btn">დღეს</button>
+          <button id="weekBtn" class="glass-btn">ამ კვირა</button>
+          <button id="clearFilterBtn" class="glass-btn">ფილტრის გასუფთავება</button>
+        </div>
+
+        <div class="actions">
+          <button id="applyFilterBtn" class="primary-btn">ფოტოების ნახვა</button>
+          <button id="downloadZipBtn" class="glass-btn">მონიშნულის ZIP</button>
+        </div>
+
+        <div class="danger-zone">
+          <button id="deleteSelectedBtn" class="danger-btn">მონიშნულის წაშლა</button>
+        </div>
+      </section>
+    </main>
+
+    <section class="card list-card">
+      <div class="list-header">
+        <div>
+          <h2>ფოტოების სია</h2>
+          <p id="countText">ფოტოები იტვირთება...</p>
+        </div>
+        <div class="list-actions">
+          <button id="selectAllBtn" class="glass-btn small">ყველას მონიშვნა</button>
+          <button id="unselectAllBtn" class="glass-btn small">მოხსნა</button>
+          <button id="shareWhatsAppBtn" class="whatsapp-btn">WhatsApp-ზე გაგზავნა</button>
+        </div>
+      </div>
+
+      <div id="photoList" class="photo-list">
+        <div class="loader">იტვირთება...</div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>ფოტოები ინახება ImgBB-ზე, ხოლო სახელები და ინფორმაცია Google Sheet-ში.</span>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    window.VITRINA_CONFIG = {
+      WEB_APP_URL: "https://script.google.com/macros/s/AKfycbzhxwIXGkoZNGJcuOa6z-M3BDg5TRPdenO6OwJpjlybVtTpPGBdcCd8txpgqBs7V4jF/exec"
+    };
+  </script>
+  <script src="script.js"></script>
+</body>
+</html>
