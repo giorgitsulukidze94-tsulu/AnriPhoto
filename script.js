@@ -5,7 +5,6 @@ const state = {
   selectedFiles: [],
   photos: [],
   localFileById: new Map(),
-  localFileByName: new Map(),
   uploading: false
 };
 
@@ -28,6 +27,7 @@ const els = {
   searchName: $("searchName"),
   todayBtn: $("todayBtn"),
   weekBtn: $("weekBtn"),
+  allPhotosBtn: $("allPhotosBtn"),
   clearFilterBtn: $("clearFilterBtn"),
   applyFilterBtn: $("applyFilterBtn"),
   downloadZipBtn: $("downloadZipBtn"),
@@ -53,18 +53,24 @@ function bindEvents() {
 
   els.refreshBtn.addEventListener("click", loadPhotos);
   els.applyFilterBtn.addEventListener("click", loadPhotos);
+
   els.todayBtn.addEventListener("click", () => {
     setTodayFilter();
     loadPhotos();
   });
+
   els.weekBtn.addEventListener("click", () => {
     setCurrentWeekFilter();
     loadPhotos();
   });
+
+  els.allPhotosBtn.addEventListener("click", () => {
+    clearFilters();
+    loadPhotos();
+  });
+
   els.clearFilterBtn.addEventListener("click", () => {
-    els.fromDate.value = "";
-    els.toDate.value = "";
-    els.searchName.value = "";
+    clearFilters();
     loadPhotos();
   });
 
@@ -144,21 +150,22 @@ async function uploadSelectedFiles() {
   state.uploading = true;
   setUploadUi(true);
 
+  const uploadedPhotos = [];
+
   try {
     for (let i = 0; i < state.selectedFiles.length; i++) {
       const originalFile = state.selectedFiles[i];
       const uploadName = buildUploadName(baseName, i, state.selectedFiles.length);
+
       updateProgress(i, state.selectedFiles.length, `მზადდება ${i + 1}/${state.selectedFiles.length}`);
 
       const processed = await prepareImageForUpload(originalFile, uploadName);
-      const expectedFinalName = `${uploadName}.jpg`;
-      const localFile = new File([processed.blob], expectedFinalName, { type: processed.mimeType });
-      state.localFileByName.set(expectedFinalName.toLowerCase(), localFile);
 
       updateProgress(i, state.selectedFiles.length, `იტვირთება ${i + 1}/${state.selectedFiles.length}`);
 
-      await postToAppsScript({
+      const response = await postToAppsScript({
         action: "upload",
+        responseMode: "postMessage",
         fileName: uploadName,
         note: els.note.value.trim(),
         originalName: originalFile.name,
@@ -167,17 +174,33 @@ async function uploadSelectedFiles() {
         imageBase64: processed.base64
       });
 
-      updateProgress(i + 1, state.selectedFiles.length, `გაგზავნილია ${i + 1}/${state.selectedFiles.length}`);
+      if (!response || !response.ok) {
+        throw new Error(response && response.error ? response.error : "ატვირთვა ვერ მოხერხდა");
+      }
+
+      if (response.photo && response.photo.ID) {
+        const finalName = response.photo.FinalFileName || `${uploadName}.jpg`;
+        const localFile = new File([processed.blob], finalName, { type: processed.mimeType });
+        state.localFileById.set(response.photo.ID, localFile);
+        uploadedPhotos.push(response.photo);
+      }
+
+      updateProgress(i + 1, state.selectedFiles.length, `ატვირთულია ${i + 1}/${state.selectedFiles.length}`);
     }
 
-    showToast("ფოტოები გაიგზავნა. სია ახლდება...");
+    showToast(`ფოტოები აიტვირთა: ${uploadedPhotos.length}`);
+
     clearSelectedFiles();
 
-    // Apps Script-ს ზოგჯერ რამდენიმე წამი სჭირდება Sheet-ში ჩასაწერად.
-    await sleep(3500);
-    await loadPhotos();
+    // FIX: ატვირთვის შემდეგ ახალ ფოტოებს მაშინვე ვაჩვენებთ ქვედა სიაში.
+    clearFilters();
+    state.photos = uploadedPhotos.concat(state.photos.filter((oldPhoto) => {
+      return !uploadedPhotos.some((newPhoto) => String(newPhoto.ID) === String(oldPhoto.ID));
+    }));
+    renderPhotoList();
 
-    showToast("ატვირთვა დასრულდა");
+    // შემდეგ სერვერიდანაც ვაახლებთ.
+    setTimeout(loadPhotos, 800);
   } catch (error) {
     console.error(error);
     showToast(error.message || "შეცდომა ატვირთვისას");
@@ -287,7 +310,7 @@ function renderPhotoList() {
     downloadLink.download = photo.FinalFileName || "photo.jpg";
     downloadLink.target = "_blank";
     downloadLink.rel = "noopener";
-    downloadLink.textContent = "ჩამოტვირთვა";
+    downloadLink.textContent = "ნახვა/ჩამოტვირთვა";
 
     links.append(viewLink, downloadLink);
     item.append(checkbox, img, info, links);
@@ -317,17 +340,10 @@ async function shareSelectedToWhatsApp() {
     for (const photo of selected) {
       if (state.localFileById.has(photo.ID)) {
         files.push(state.localFileById.get(photo.ID));
-        continue;
+      } else {
+        showToast("WhatsApp-ზე გასაგზავნად გამოიყენე ახლად ატვირთული ფოტოები. ძველი ფოტოებისთვის ZIP ჩამოქაჩე.");
+        return;
       }
-
-      const finalNameKey = String(photo.FinalFileName || "").toLowerCase();
-      if (finalNameKey && state.localFileByName.has(finalNameKey)) {
-        files.push(state.localFileByName.get(finalNameKey));
-        continue;
-      }
-
-      const file = await downloadPhotoAsFile(photo);
-      files.push(file);
     }
 
     if (!files.length) {
@@ -336,14 +352,11 @@ async function shareSelectedToWhatsApp() {
     }
 
     if (navigator.canShare && !navigator.canShare({ files })) {
-      showToast("ამ ტელეფონზე რამდენიმე ფოტოს პირდაპირ WhatsApp-ზე გაგზავნა არ გამოვიდა. სცადე ნაკლები ფოტო ან სხვა ბრაუზერი.");
+      showToast("ამ ტელეფონზე რამდენიმე ფოტოს პირდაპირ WhatsApp-ზე გაგზავნა არ გამოვიდა. სცადე ნაკლები ფოტო.");
       return;
     }
 
-    await navigator.share({
-      files
-    });
-
+    await navigator.share({ files });
     showToast("გაზიარება გაიხსნა — აირჩიე WhatsApp");
   } catch (error) {
     console.error(error);
@@ -354,24 +367,6 @@ async function shareSelectedToWhatsApp() {
       showToast("ფოტოების WhatsApp-ზე გაგზავნა ვერ მოხერხდა ამ ბრაუზერში");
     }
   }
-}
-
-async function downloadPhotoAsFile(photo) {
-  const url = photo.ImageUrl || photo.DisplayUrl;
-  if (!url) {
-    throw new Error("ფოტოს URL ცარიელია");
-  }
-
-  const response = await fetch(url, { mode: "cors" });
-  if (!response.ok) {
-    throw new Error("ფოტოს ჩამოტვირთვა ვერ მოხერხდა");
-  }
-
-  const blob = await response.blob();
-  const type = blob.type || "image/jpeg";
-  const name = photo.FinalFileName || photo.UserFileName || "photo.jpg";
-
-  return new File([blob], name, { type });
 }
 
 async function createZipForSelectedOrFilter() {
@@ -479,6 +474,12 @@ function setCurrentWeekFilter() {
   els.toDate.value = toDateInputValue(sunday);
 }
 
+function clearFilters() {
+  els.fromDate.value = "";
+  els.toDate.value = "";
+  els.searchName.value = "";
+}
+
 function toDateInputValue(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -512,18 +513,18 @@ async function prepareImageForUpload(file, uploadName) {
     throw new Error("არჩეული ფაილი ფოტო არ არის");
   }
 
-  const bitmap = await loadImageBitmap(file);
+  const img = await loadImageElement(file);
   const maxSide = 2200;
-  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-  const width = Math.round(bitmap.width * scale);
-  const height = Math.round(bitmap.height * scale);
+  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+  const width = Math.round(img.naturalWidth * scale);
+  const height = Math.round(img.naturalHeight * scale);
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
 
   const ctx = canvas.getContext("2d", { alpha: false });
-  ctx.drawImage(bitmap, 0, 0, width, height);
+  ctx.drawImage(img, 0, 0, width, height);
 
   const blob = await canvasToBlob(canvas, "image/jpeg", 0.9);
   const base64 = await blobToBase64(blob);
@@ -536,7 +537,7 @@ async function prepareImageForUpload(file, uploadName) {
   };
 }
 
-function loadImageBitmap(file) {
+function loadImageElement(file) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -578,26 +579,66 @@ function blobToBase64(blob) {
   });
 }
 
-async function postToAppsScript(payload) {
-  // FIX: აღარ ველოდებით hidden iframe-ის პასუხს, რადგან ზოგ ბრაუზერში/Google Apps Script-ში
-  // iframe პასუხი იჭედება და ეკრანზე რჩება "იტვირთება 1/1".
-  // no-cors POST მოთხოვნა Apps Script-მდე მიდის, ხოლო შედეგს შემდეგ list-ით ვამოწმებთ.
-  const body = JSON.stringify(payload);
+function postToAppsScript(payload) {
+  return new Promise((resolve, reject) => {
+    const iframeName = `upload_frame_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const form = document.createElement("form");
+    const iframe = document.createElement("iframe");
 
-  await fetch(WEB_APP_URL, {
-    method: "POST",
-    mode: "no-cors",
-    headers: {
-      "Content-Type": "text/plain;charset=utf-8"
-    },
-    body
+    let finished = false;
+    const timeoutMs = 120000;
+
+    iframe.name = iframeName;
+    iframe.style.display = "none";
+
+    form.method = "POST";
+    form.action = WEB_APP_URL;
+    form.target = iframeName;
+    form.style.display = "none";
+    form.enctype = "application/x-www-form-urlencoded";
+
+    Object.entries(payload).forEach(([key, value]) => {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = key;
+      input.value = value == null ? "" : String(value);
+      form.appendChild(input);
+    });
+
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      form.remove();
+      iframe.remove();
+    };
+
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      reject(new Error("ატვირთვის პასუხი დაგვიანდა"));
+    }, timeoutMs);
+
+    const onMessage = (event) => {
+      const data = event.data;
+
+      if (!data || data.source !== "vitrina-apps-script") {
+        return;
+      }
+
+      if (finished) return;
+
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve(data.payload);
+    };
+
+    window.addEventListener("message", onMessage);
+
+    document.body.appendChild(iframe);
+    document.body.appendChild(form);
+    form.submit();
   });
-
-  return { ok: true };
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function jsonp(params) {
@@ -612,6 +653,7 @@ function jsonp(params) {
     });
 
     url.searchParams.set("callback", callbackName);
+    url.searchParams.set("_", String(Date.now()));
 
     const script = document.createElement("script");
     let finished = false;
