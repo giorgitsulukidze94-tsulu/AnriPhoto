@@ -1,11 +1,15 @@
 :root {
   --bg: #eef3f9;
   --card: rgba(255, 255, 255, 0.72);
+  --card-strong: rgba(255, 255, 255, 0.9);
   --text: #111827;
   --muted: #6b7280;
   --line: rgba(17, 24, 39, 0.12);
+  --primary: #111827;
+  --primary-soft: rgba(17, 24, 39, 0.08);
   --danger: #dc2626;
   --danger-soft: rgba(220, 38, 38, 0.1);
+  --whatsapp: #128c7e;
   --shadow: 0 24px 60px rgba(15, 23, 42, 0.12);
   --radius: 26px;
 }

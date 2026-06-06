@@ -5,6 +5,7 @@ const state = {
   selectedFiles: [],
   photos: [],
   localFileById: new Map(),
+  localFileByName: new Map(),
   uploading: false
 };
 
@@ -27,7 +28,6 @@ const els = {
   searchName: $("searchName"),
   todayBtn: $("todayBtn"),
   weekBtn: $("weekBtn"),
-  allPhotosBtn: $("allPhotosBtn"),
   clearFilterBtn: $("clearFilterBtn"),
   applyFilterBtn: $("applyFilterBtn"),
   downloadZipBtn: $("downloadZipBtn"),
@@ -53,24 +53,18 @@ function bindEvents() {
 
   els.refreshBtn.addEventListener("click", loadPhotos);
   els.applyFilterBtn.addEventListener("click", loadPhotos);
-
   els.todayBtn.addEventListener("click", () => {
     setTodayFilter();
     loadPhotos();
   });
-
   els.weekBtn.addEventListener("click", () => {
     setCurrentWeekFilter();
     loadPhotos();
   });
-
-  els.allPhotosBtn.addEventListener("click", () => {
-    clearFilters();
-    loadPhotos();
-  });
-
   els.clearFilterBtn.addEventListener("click", () => {
-    clearFilters();
+    els.fromDate.value = "";
+    els.toDate.value = "";
+    els.searchName.value = "";
     loadPhotos();
   });
 
@@ -150,22 +144,38 @@ async function uploadSelectedFiles() {
   state.uploading = true;
   setUploadUi(true);
 
-  const uploadedPhotos = [];
+  const total = state.selectedFiles.length;
+
+  // Get TOTAL (unfiltered) count before upload so polling can detect new photo
+  // regardless of current date/name filter
+  let countBefore = state.photos.length;
+  try {
+    const baseResult = await jsonp({ action: "list", status: "ACTIVE" });
+    if (baseResult && baseResult.ok) countBefore = (baseResult.photos || []).length;
+  } catch (e) { /* use filtered count as fallback */ }
 
   try {
-    for (let i = 0; i < state.selectedFiles.length; i++) {
+    for (let i = 0; i < total; i++) {
       const originalFile = state.selectedFiles[i];
-      const uploadName = buildUploadName(baseName, i, state.selectedFiles.length);
+      const uploadName = buildUploadName(baseName, i, total);
 
-      updateProgress(i, state.selectedFiles.length, `მზადდება ${i + 1}/${state.selectedFiles.length}`);
+      // Phase 1: compress image (steps 0-2 out of 4 per file)
+      const phaseBase = i * 4;
+      const phaseTotal = total * 4;
 
-      const processed = await prepareImageForUpload(originalFile, uploadName);
+      updateProgress(phaseBase, phaseTotal, `${i + 1}/${total}: ფოტო იხსნება...`);
+      const processed = await prepareImageForUpload(originalFile, uploadName, (msg) => {
+        updateProgress(phaseBase + 1, phaseTotal, `${i + 1}/${total}: ${msg}`);
+      });
 
-      updateProgress(i, state.selectedFiles.length, `იტვირთება ${i + 1}/${state.selectedFiles.length}`);
+      const expectedFinalName = `${uploadName}.jpg`;
+      const localFile = new File([processed.blob], expectedFinalName, { type: processed.mimeType });
+      state.localFileByName.set(expectedFinalName.toLowerCase(), localFile);
 
-      const response = await postToAppsScript({
+      // Phase 2: send to Apps Script
+      updateProgress(phaseBase + 2, phaseTotal, `${i + 1}/${total}: სერვერზე იგზავნება...`);
+      await postToAppsScript({
         action: "upload",
-        responseMode: "postMessage",
         fileName: uploadName,
         note: els.note.value.trim(),
         originalName: originalFile.name,
@@ -174,33 +184,20 @@ async function uploadSelectedFiles() {
         imageBase64: processed.base64
       });
 
-      if (!response || !response.ok) {
-        throw new Error(response && response.error ? response.error : "ატვირთვა ვერ მოხერხდა");
-      }
-
-      if (response.photo && response.photo.ID) {
-        const finalName = response.photo.FinalFileName || `${uploadName}.jpg`;
-        const localFile = new File([processed.blob], finalName, { type: processed.mimeType });
-        state.localFileById.set(response.photo.ID, localFile);
-        uploadedPhotos.push(response.photo);
-      }
-
-      updateProgress(i + 1, state.selectedFiles.length, `ატვირთულია ${i + 1}/${state.selectedFiles.length}`);
+      updateProgress(phaseBase + 3, phaseTotal, `${i + 1}/${total}: გაგზავნილია ✓`);
     }
 
-    showToast(`ფოტოები აიტვირთა: ${uploadedPhotos.length}`);
-
+    showToast("გაიგზავნა — სერვერი ამუშავებს...");
     clearSelectedFiles();
 
-    // FIX: ატვირთვის შემდეგ ახალ ფოტოებს მაშინვე ვაჩვენებთ ქვედა სიაში.
-    clearFilters();
-    state.photos = uploadedPhotos.concat(state.photos.filter((oldPhoto) => {
-      return !uploadedPhotos.some((newPhoto) => String(newPhoto.ID) === String(oldPhoto.ID));
-    }));
-    renderPhotoList();
-
-    // შემდეგ სერვერიდანაც ვაახლებთ.
-    setTimeout(loadPhotos, 800);
+    // Poll until the new photo appears in the list (max ~20 seconds)
+    const appeared = await pollForNewPhotos(countBefore);
+    if (appeared) {
+      showToast("ატვირთვა დასრულდა ✓");
+    } else {
+      showToast("გაიგზავნა. თუ სიაში ჯერ არ ჩანს — ცოტა ხანში განახლება სცადე.");
+      await loadPhotos();
+    }
   } catch (error) {
     console.error(error);
     showToast(error.message || "შეცდომა ატვირთვისას");
@@ -208,6 +205,30 @@ async function uploadSelectedFiles() {
     state.uploading = false;
     setUploadUi(false);
   }
+}
+
+// Poll every 2.5s (up to 8 times = 20s) until total photo count grows,
+// then reload with current filter so the photo appears correctly.
+// Using no filter for detection avoids misses when date/name filter is active.
+async function pollForNewPhotos(countBefore, maxAttempts = 8, intervalMs = 2500) {
+  const maxSec = Math.round((maxAttempts * intervalMs) / 1000);
+  for (let i = 0; i < maxAttempts; i++) {
+    const elapsed = Math.round(((i + 1) * intervalMs) / 1000);
+    updateProgress(100, 100, `შემოწმება... ${elapsed}/${maxSec}წმ`);
+    await sleep(intervalMs);
+    try {
+      // Poll without any filter to reliably detect the new photo
+      const result = await jsonp({ action: "list", status: "ACTIVE" });
+      if (result && result.ok && Array.isArray(result.photos) && result.photos.length > countBefore) {
+        // New photo confirmed — now reload with current filter for correct display
+        await loadPhotos();
+        return true;
+      }
+    } catch (e) {
+      // network hiccup — keep polling
+    }
+  }
+  return false;
 }
 
 function setUploadUi(isUploading) {
@@ -310,7 +331,7 @@ function renderPhotoList() {
     downloadLink.download = photo.FinalFileName || "photo.jpg";
     downloadLink.target = "_blank";
     downloadLink.rel = "noopener";
-    downloadLink.textContent = "ნახვა/ჩამოტვირთვა";
+    downloadLink.textContent = "ჩამოტვირთვა";
 
     links.append(viewLink, downloadLink);
     item.append(checkbox, img, info, links);
@@ -340,10 +361,17 @@ async function shareSelectedToWhatsApp() {
     for (const photo of selected) {
       if (state.localFileById.has(photo.ID)) {
         files.push(state.localFileById.get(photo.ID));
-      } else {
-        showToast("WhatsApp-ზე გასაგზავნად გამოიყენე ახლად ატვირთული ფოტოები. ძველი ფოტოებისთვის ZIP ჩამოქაჩე.");
-        return;
+        continue;
       }
+
+      const finalNameKey = String(photo.FinalFileName || "").toLowerCase();
+      if (finalNameKey && state.localFileByName.has(finalNameKey)) {
+        files.push(state.localFileByName.get(finalNameKey));
+        continue;
+      }
+
+      const file = await downloadPhotoAsFile(photo);
+      files.push(file);
     }
 
     if (!files.length) {
@@ -352,11 +380,14 @@ async function shareSelectedToWhatsApp() {
     }
 
     if (navigator.canShare && !navigator.canShare({ files })) {
-      showToast("ამ ტელეფონზე რამდენიმე ფოტოს პირდაპირ WhatsApp-ზე გაგზავნა არ გამოვიდა. სცადე ნაკლები ფოტო.");
+      showToast("ამ ტელეფონზე რამდენიმე ფოტოს პირდაპირ WhatsApp-ზე გაგზავნა არ გამოვიდა. სცადე ნაკლები ფოტო ან სხვა ბრაუზერი.");
       return;
     }
 
-    await navigator.share({ files });
+    await navigator.share({
+      files
+    });
+
     showToast("გაზიარება გაიხსნა — აირჩიე WhatsApp");
   } catch (error) {
     console.error(error);
@@ -367,6 +398,24 @@ async function shareSelectedToWhatsApp() {
       showToast("ფოტოების WhatsApp-ზე გაგზავნა ვერ მოხერხდა ამ ბრაუზერში");
     }
   }
+}
+
+async function downloadPhotoAsFile(photo) {
+  const url = photo.ImageUrl || photo.DisplayUrl;
+  if (!url) {
+    throw new Error("ფოტოს URL ცარიელია");
+  }
+
+  const response = await fetch(url, { mode: "cors" });
+  if (!response.ok) {
+    throw new Error("ფოტოს ჩამოტვირთვა ვერ მოხერხდა");
+  }
+
+  const blob = await response.blob();
+  const type = blob.type || "image/jpeg";
+  const name = photo.FinalFileName || photo.UserFileName || "photo.jpg";
+
+  return new File([blob], name, { type });
 }
 
 async function createZipForSelectedOrFilter() {
@@ -474,12 +523,6 @@ function setCurrentWeekFilter() {
   els.toDate.value = toDateInputValue(sunday);
 }
 
-function clearFilters() {
-  els.fromDate.value = "";
-  els.toDate.value = "";
-  els.searchName.value = "";
-}
-
 function toDateInputValue(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -507,26 +550,32 @@ function sanitizeFileName(value) {
     .slice(0, 120);
 }
 
-async function prepareImageForUpload(file, uploadName) {
+// onProgress callback receives a short status string for the progress bar
+async function prepareImageForUpload(file, uploadName, onProgress) {
   const isImage = file.type && file.type.startsWith("image/");
   if (!isImage) {
     throw new Error("არჩეული ფაილი ფოტო არ არის");
   }
 
-  const img = await loadImageElement(file);
+  onProgress && onProgress("ფოტო იხსნება...");
+  const bitmap = await loadImageBitmap(file);
+
   const maxSide = 2200;
-  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
-  const width = Math.round(img.naturalWidth * scale);
-  const height = Math.round(img.naturalHeight * scale);
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
 
   const ctx = canvas.getContext("2d", { alpha: false });
-  ctx.drawImage(img, 0, 0, width, height);
+  ctx.drawImage(bitmap, 0, 0, width, height);
 
+  onProgress && onProgress("კომპრესია...");
   const blob = await canvasToBlob(canvas, "image/jpeg", 0.9);
+
+  onProgress && onProgress("მზადდება...");
   const base64 = await blobToBase64(blob);
 
   return {
@@ -537,7 +586,7 @@ async function prepareImageForUpload(file, uploadName) {
   };
 }
 
-function loadImageElement(file) {
+function loadImageBitmap(file) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -579,66 +628,30 @@ function blobToBase64(blob) {
   });
 }
 
-function postToAppsScript(payload) {
-  return new Promise((resolve, reject) => {
-    const iframeName = `upload_frame_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    const form = document.createElement("form");
-    const iframe = document.createElement("iframe");
-
-    let finished = false;
-    const timeoutMs = 120000;
-
-    iframe.name = iframeName;
-    iframe.style.display = "none";
-
-    form.method = "POST";
-    form.action = WEB_APP_URL;
-    form.target = iframeName;
-    form.style.display = "none";
-    form.enctype = "application/x-www-form-urlencoded";
-
-    Object.entries(payload).forEach(([key, value]) => {
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = key;
-      input.value = value == null ? "" : String(value);
-      form.appendChild(input);
-    });
-
-    const cleanup = () => {
-      window.removeEventListener("message", onMessage);
-      form.remove();
-      iframe.remove();
-    };
-
-    const timer = setTimeout(() => {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      reject(new Error("ატვირთვის პასუხი დაგვიანდა"));
-    }, timeoutMs);
-
-    const onMessage = (event) => {
-      const data = event.data;
-
-      if (!data || data.source !== "vitrina-apps-script") {
-        return;
-      }
-
-      if (finished) return;
-
-      finished = true;
-      clearTimeout(timer);
-      cleanup();
-      resolve(data.payload);
-    };
-
-    window.addEventListener("message", onMessage);
-
-    document.body.appendChild(iframe);
-    document.body.appendChild(form);
-    form.submit();
+async function postToAppsScript(payload) {
+  // FIX: Use URLSearchParams (application/x-www-form-urlencoded) instead of
+  // raw JSON text/plain. Apps Script reliably parses form-encoded POST bodies
+  // via e.parameter, whereas text/plain JSON parsing is less stable.
+  const params = new URLSearchParams();
+  Object.entries(payload).forEach(([key, value]) => {
+    params.append(key, value === null || value === undefined ? "" : String(value));
   });
+
+  try {
+    await fetch(WEB_APP_URL, {
+      method: "POST",
+      mode: "no-cors",
+      body: params
+    });
+  } catch (err) {
+    throw new Error("სერვერთან კავშირი ვერ მოხერხდა: " + (err.message || String(err)));
+  }
+
+  return { ok: true };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function jsonp(params) {
@@ -653,7 +666,6 @@ function jsonp(params) {
     });
 
     url.searchParams.set("callback", callbackName);
-    url.searchParams.set("_", String(Date.now()));
 
     const script = document.createElement("script");
     let finished = false;
