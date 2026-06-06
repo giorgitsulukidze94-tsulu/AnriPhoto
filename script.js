@@ -146,33 +146,43 @@ async function uploadSelectedFiles() {
 
   const total = state.selectedFiles.length;
 
-  // Get TOTAL (unfiltered) count before upload so polling can detect new photo
-  // regardless of current date/name filter
-  let countBefore = state.photos.length;
+  // Get global (unfiltered) photo count for reliable new-photo detection.
+  // One quick API call here avoids the need for a complex count comparison later.
+  updateProgress(0, 100, "მზადდება...");
+  let globalCountBefore = state.photos.length;
   try {
-    const baseResult = await jsonp({ action: "list", status: "ACTIVE" });
-    if (baseResult && baseResult.ok) countBefore = (baseResult.photos || []).length;
+    const baseline = await jsonp({ action: "list", status: "ACTIVE" });
+    if (baseline && baseline.ok) globalCountBefore = (baseline.photos || []).length;
   } catch (e) { /* use filtered count as fallback */ }
+
+  const optimisticBlobUrls = [];
 
   try {
     for (let i = 0; i < total; i++) {
       const originalFile = state.selectedFiles[i];
       const uploadName = buildUploadName(baseName, i, total);
 
-      // Phase 1: compress image (steps 0-2 out of 4 per file)
-      const phaseBase = i * 4;
-      const phaseTotal = total * 4;
+      const phaseBase = i * 3;
+      const phaseTotal = total * 3;
 
+      // Step 1: decode + compress
       updateProgress(phaseBase, phaseTotal, `${i + 1}/${total}: ფოტო იხსნება...`);
       const processed = await prepareImageForUpload(originalFile, uploadName, (msg) => {
         updateProgress(phaseBase + 1, phaseTotal, `${i + 1}/${total}: ${msg}`);
       });
 
-      const expectedFinalName = `${uploadName}.jpg`;
-      const localFile = new File([processed.blob], expectedFinalName, { type: processed.mimeType });
-      state.localFileByName.set(expectedFinalName.toLowerCase(), localFile);
+      // Show photo IMMEDIATELY in gallery (optimistic UI) before server confirms
+      const blobUrl = URL.createObjectURL(processed.blob);
+      optimisticBlobUrls.push(blobUrl);
+      addOptimisticPhoto(blobUrl, `${uploadName}.jpg`, els.note.value.trim());
 
-      // Phase 2: send to Apps Script
+      const expectedFinalName = `${uploadName}.jpg`;
+      state.localFileByName.set(
+        expectedFinalName.toLowerCase(),
+        new File([processed.blob], expectedFinalName, { type: processed.mimeType })
+      );
+
+      // Step 2: send to Apps Script
       updateProgress(phaseBase + 2, phaseTotal, `${i + 1}/${total}: სერვერზე იგზავნება...`);
       await postToAppsScript({
         action: "upload",
@@ -183,22 +193,22 @@ async function uploadSelectedFiles() {
         sizeBytes: processed.blob.size,
         imageBase64: processed.base64
       });
-
-      updateProgress(phaseBase + 3, phaseTotal, `${i + 1}/${total}: გაგზავნილია ✓`);
     }
 
-    showToast("გაიგზავნა — სერვერი ამუშავებს...");
     clearSelectedFiles();
+    showToast("გაიგზავნა — სერვერი ამუშავებს...");
 
-    // Poll until the new photo appears in the list (max ~20 seconds)
-    const appeared = await pollForNewPhotos(countBefore);
+    // Poll until the real server photo appears, then swap out the optimistic placeholder
+    const appeared = await pollForNewPhotos(globalCountBefore, optimisticBlobUrls);
     if (appeared) {
       showToast("ატვირთვა დასრულდა ✓");
     } else {
-      showToast("გაიგზავნა. თუ სიაში ჯერ არ ჩანს — ცოტა ხანში განახლება სცადე.");
+      removeOptimisticPhotos(optimisticBlobUrls);
+      showToast("გაიგზავნა. სიაში არ ჩანს — ცოტა ხანში განახლება სცადე.");
       await loadPhotos();
     }
   } catch (error) {
+    removeOptimisticPhotos(optimisticBlobUrls);
     console.error(error);
     showToast(error.message || "შეცდომა ატვირთვისას");
   } finally {
@@ -207,21 +217,71 @@ async function uploadSelectedFiles() {
   }
 }
 
-// Poll every 2.5s (up to 8 times = 20s) until total photo count grows,
-// then reload with current filter so the photo appears correctly.
-// Using no filter for detection avoids misses when date/name filter is active.
-async function pollForNewPhotos(countBefore, maxAttempts = 8, intervalMs = 2500) {
+// Add a placeholder photo item to the gallery immediately while uploading
+function addOptimisticPhoto(blobUrl, name, note) {
+  // Remove loader / empty-state if present
+  const placeholder = els.photoList.querySelector(".loader, .empty-state");
+  if (placeholder) placeholder.remove();
+
+  const item = document.createElement("div");
+  item.className = "photo-item uploading";
+  item.dataset.optimisticUrl = blobUrl;
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "photo-check";
+  checkbox.disabled = true;
+
+  const img = document.createElement("img");
+  img.className = "photo-thumb";
+  img.src = blobUrl;
+
+  const info = document.createElement("div");
+  info.className = "photo-info";
+  info.innerHTML = `
+    <strong>${escapeHtml(name)}</strong>
+    <small>${note ? escapeHtml(note) + " • " : ""}იტვირთება...</small>
+  `;
+
+  const linkArea = document.createElement("div");
+  linkArea.className = "photo-links";
+  linkArea.style.cssText = "color:var(--muted);font-size:12px;padding-right:4px";
+  linkArea.textContent = "⏳";
+
+  item.append(checkbox, img, info, linkArea);
+
+  // Prepend so newest photo is at the top
+  if (els.photoList.firstChild) {
+    els.photoList.insertBefore(item, els.photoList.firstChild);
+  } else {
+    els.photoList.appendChild(item);
+  }
+
+  // Keep count text in sync
+  const match = els.countText.textContent.match(/\d+/);
+  const prev = match ? parseInt(match[0]) : 0;
+  els.countText.textContent = `ნაპოვნია ${prev + 1} ფოტო`;
+}
+
+// Remove all optimistic placeholders and free their blob URLs
+function removeOptimisticPhotos(blobUrls) {
+  (blobUrls || []).forEach(url => URL.revokeObjectURL(url));
+  document.querySelectorAll(".photo-item.uploading").forEach(el => el.remove());
+}
+
+// Poll every 1.5s (up to 10 times = 15s) until global photo count grows.
+// Using no filter for detection so new photo is found regardless of active date/name filter.
+async function pollForNewPhotos(globalCountBefore, optimisticBlobUrls, maxAttempts = 10, intervalMs = 1500) {
   const maxSec = Math.round((maxAttempts * intervalMs) / 1000);
   for (let i = 0; i < maxAttempts; i++) {
     const elapsed = Math.round(((i + 1) * intervalMs) / 1000);
     updateProgress(100, 100, `შემოწმება... ${elapsed}/${maxSec}წმ`);
     await sleep(intervalMs);
     try {
-      // Poll without any filter to reliably detect the new photo
       const result = await jsonp({ action: "list", status: "ACTIVE" });
-      if (result && result.ok && Array.isArray(result.photos) && result.photos.length > countBefore) {
-        // New photo confirmed — now reload with current filter for correct display
-        await loadPhotos();
+      if (result && result.ok && Array.isArray(result.photos) && result.photos.length > globalCountBefore) {
+        removeOptimisticPhotos(optimisticBlobUrls);
+        await loadPhotos(); // reload with current filter to display correctly
         return true;
       }
     } catch (e) {
@@ -384,9 +444,7 @@ async function shareSelectedToWhatsApp() {
       return;
     }
 
-    await navigator.share({
-      files
-    });
+    await navigator.share({ files });
 
     showToast("გაზიარება გაიხსნა — აირჩიე WhatsApp");
   } catch (error) {
@@ -402,14 +460,10 @@ async function shareSelectedToWhatsApp() {
 
 async function downloadPhotoAsFile(photo) {
   const url = photo.ImageUrl || photo.DisplayUrl;
-  if (!url) {
-    throw new Error("ფოტოს URL ცარიელია");
-  }
+  if (!url) throw new Error("ფოტოს URL ცარიელია");
 
   const response = await fetch(url, { mode: "cors" });
-  if (!response.ok) {
-    throw new Error("ფოტოს ჩამოტვირთვა ვერ მოხერხდა");
-  }
+  if (!response.ok) throw new Error("ფოტოს ჩამოტვირთვა ვერ მოხერხდა");
 
   const blob = await response.blob();
   const type = blob.type || "image/jpeg";
@@ -550,17 +604,32 @@ function sanitizeFileName(value) {
     .slice(0, 120);
 }
 
-// onProgress callback receives a short status string for the progress bar
+// Decode file to drawable image, using the fast native createImageBitmap where available
+async function decodeImageToBitmap(file) {
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(file);
+    } catch (e) { /* fall through to legacy path */ }
+  }
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("ფოტოს წაკითხვა ვერ მოხერხდა")); };
+    img.src = url;
+  });
+}
+
+// onProgress(msg) is called at each stage for granular progress display
 async function prepareImageForUpload(file, uploadName, onProgress) {
   const isImage = file.type && file.type.startsWith("image/");
-  if (!isImage) {
-    throw new Error("არჩეული ფაილი ფოტო არ არის");
-  }
+  if (!isImage) throw new Error("არჩეული ფაილი ფოტო არ არის");
 
   onProgress && onProgress("ფოტო იხსნება...");
-  const bitmap = await loadImageBitmap(file);
+  const bitmap = await decodeImageToBitmap(file);
 
-  const maxSide = 2200;
+  // 1600px max — ~50% fewer pixels than 2200px, significantly faster compress + upload
+  const maxSide = 1600;
   const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
   const width = Math.round(bitmap.width * scale);
   const height = Math.round(bitmap.height * scale);
@@ -571,9 +640,10 @@ async function prepareImageForUpload(file, uploadName, onProgress) {
 
   const ctx = canvas.getContext("2d", { alpha: false });
   ctx.drawImage(bitmap, 0, 0, width, height);
+  if (typeof bitmap.close === "function") bitmap.close(); // free ImageBitmap memory
 
   onProgress && onProgress("კომპრესია...");
-  const blob = await canvasToBlob(canvas, "image/jpeg", 0.9);
+  const blob = await canvasToBlob(canvas, "image/jpeg", 0.85); // 0.85 vs 0.9 → ~30% smaller
 
   onProgress && onProgress("მზადდება...");
   const base64 = await blobToBase64(blob);
@@ -584,25 +654,6 @@ async function prepareImageForUpload(file, uploadName, onProgress) {
     mimeType: "image/jpeg",
     finalName: `${uploadName}.jpg`
   };
-}
-
-function loadImageBitmap(file) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("ფოტოს წაკითხვა ვერ მოხერხდა"));
-    };
-
-    img.src = url;
-  });
 }
 
 function canvasToBlob(canvas, type, quality) {
@@ -629,9 +680,8 @@ function blobToBase64(blob) {
 }
 
 async function postToAppsScript(payload) {
-  // FIX: Use URLSearchParams (application/x-www-form-urlencoded) instead of
-  // raw JSON text/plain. Apps Script reliably parses form-encoded POST bodies
-  // via e.parameter, whereas text/plain JSON parsing is less stable.
+  // URLSearchParams (application/x-www-form-urlencoded) is reliably parsed
+  // by Apps Script via e.parameter — more stable than raw text/plain JSON.
   const params = new URLSearchParams();
   Object.entries(payload).forEach(([key, value]) => {
     params.append(key, value === null || value === undefined ? "" : String(value));

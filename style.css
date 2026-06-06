@@ -422,6 +422,21 @@ input:focus {
   margin-top: 18px;
 }
 
+/* Optimistic upload placeholder — pulsing while server processes */
+@keyframes vitrina-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+.photo-item.uploading {
+  animation: vitrina-pulse 1.4s ease-in-out infinite;
+  border-color: rgba(17, 24, 39, 0.18);
+}
+
+.photo-item.uploading .photo-thumb {
+  filter: brightness(0.75);
+}
+
 @media (max-width: 880px) {
   .hero,
   .list-header {
