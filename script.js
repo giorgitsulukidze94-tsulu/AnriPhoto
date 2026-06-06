@@ -5,6 +5,7 @@ const state = {
   selectedFiles: [],
   photos: [],
   localFileById: new Map(),
+  localFileByName: new Map(),
   uploading: false
 };
 
@@ -150,12 +151,14 @@ async function uploadSelectedFiles() {
       updateProgress(i, state.selectedFiles.length, `მზადდება ${i + 1}/${state.selectedFiles.length}`);
 
       const processed = await prepareImageForUpload(originalFile, uploadName);
+      const expectedFinalName = `${uploadName}.jpg`;
+      const localFile = new File([processed.blob], expectedFinalName, { type: processed.mimeType });
+      state.localFileByName.set(expectedFinalName.toLowerCase(), localFile);
 
       updateProgress(i, state.selectedFiles.length, `იტვირთება ${i + 1}/${state.selectedFiles.length}`);
 
-      const response = await postToAppsScript({
+      await postToAppsScript({
         action: "upload",
-        responseMode: "postMessage",
         fileName: uploadName,
         note: els.note.value.trim(),
         originalName: originalFile.name,
@@ -164,22 +167,17 @@ async function uploadSelectedFiles() {
         imageBase64: processed.base64
       });
 
-      if (!response || !response.ok) {
-        throw new Error(response && response.error ? response.error : "ატვირთვა ვერ მოხერხდა");
-      }
-
-      if (response.photo && response.photo.ID) {
-        const finalName = response.photo.FinalFileName || `${uploadName}.jpg`;
-        const localFile = new File([processed.blob], finalName, { type: processed.mimeType });
-        state.localFileById.set(response.photo.ID, localFile);
-      }
-
-      updateProgress(i + 1, state.selectedFiles.length, `ატვირთულია ${i + 1}/${state.selectedFiles.length}`);
+      updateProgress(i + 1, state.selectedFiles.length, `გაგზავნილია ${i + 1}/${state.selectedFiles.length}`);
     }
 
-    showToast("ფოტოები აიტვირთა");
+    showToast("ფოტოები გაიგზავნა. სია ახლდება...");
     clearSelectedFiles();
+
+    // Apps Script-ს ზოგჯერ რამდენიმე წამი სჭირდება Sheet-ში ჩასაწერად.
+    await sleep(3500);
     await loadPhotos();
+
+    showToast("ატვირთვა დასრულდა");
   } catch (error) {
     console.error(error);
     showToast(error.message || "შეცდომა ატვირთვისას");
@@ -319,6 +317,12 @@ async function shareSelectedToWhatsApp() {
     for (const photo of selected) {
       if (state.localFileById.has(photo.ID)) {
         files.push(state.localFileById.get(photo.ID));
+        continue;
+      }
+
+      const finalNameKey = String(photo.FinalFileName || "").toLowerCase();
+      if (finalNameKey && state.localFileByName.has(finalNameKey)) {
+        files.push(state.localFileByName.get(finalNameKey));
         continue;
       }
 
@@ -574,66 +578,26 @@ function blobToBase64(blob) {
   });
 }
 
-function postToAppsScript(payload) {
-  return new Promise((resolve, reject) => {
-    const iframeName = `upload_frame_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    const form = document.createElement("form");
-    const iframe = document.createElement("iframe");
+async function postToAppsScript(payload) {
+  // FIX: აღარ ველოდებით hidden iframe-ის პასუხს, რადგან ზოგ ბრაუზერში/Google Apps Script-ში
+  // iframe პასუხი იჭედება და ეკრანზე რჩება "იტვირთება 1/1".
+  // no-cors POST მოთხოვნა Apps Script-მდე მიდის, ხოლო შედეგს შემდეგ list-ით ვამოწმებთ.
+  const body = JSON.stringify(payload);
 
-    let finished = false;
-    const timeoutMs = 120000;
-
-    iframe.name = iframeName;
-    iframe.style.display = "none";
-
-    form.method = "POST";
-    form.action = WEB_APP_URL;
-    form.target = iframeName;
-    form.style.display = "none";
-    form.enctype = "application/x-www-form-urlencoded";
-
-    Object.entries(payload).forEach(([key, value]) => {
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = key;
-      input.value = value == null ? "" : String(value);
-      form.appendChild(input);
-    });
-
-    const cleanup = () => {
-      window.removeEventListener("message", onMessage);
-      form.remove();
-      iframe.remove();
-    };
-
-    const timer = setTimeout(() => {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      reject(new Error("ატვირთვის პასუხი დაგვიანდა"));
-    }, timeoutMs);
-
-    const onMessage = (event) => {
-      const data = event.data;
-
-      if (!data || data.source !== "vitrina-apps-script") {
-        return;
-      }
-
-      if (finished) return;
-
-      finished = true;
-      clearTimeout(timer);
-      cleanup();
-      resolve(data.payload);
-    };
-
-    window.addEventListener("message", onMessage);
-
-    document.body.appendChild(iframe);
-    document.body.appendChild(form);
-    form.submit();
+  await fetch(WEB_APP_URL, {
+    method: "POST",
+    mode: "no-cors",
+    headers: {
+      "Content-Type": "text/plain;charset=utf-8"
+    },
+    body
   });
+
+  return { ok: true };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function jsonp(params) {
